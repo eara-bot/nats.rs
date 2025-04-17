@@ -600,7 +600,7 @@ impl HeaderName {
 
     /// Returns a `str` representation of the header.
     #[inline]
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self.inner {
             HeaderRepr::Standard(v) => v.as_str(),
             HeaderRepr::Custom(ref v) => v.as_str(),
