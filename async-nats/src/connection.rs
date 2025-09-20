@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 
 #[cfg(feature = "websockets")]
 use {
-    futures::{SinkExt, StreamExt},
+    futures_util::{SinkExt, StreamExt},
     pin_project::pin_project,
     tokio::io::ReadBuf,
     tokio_websockets::WebSocketStream,
@@ -354,9 +354,11 @@ impl Connection {
                 .map(|(status, description)| (status.trim(), description.trim()))
                 .unwrap_or((version_line_suffix, ""));
             let status = if !status.is_empty() {
-                Some(status.parse::<StatusCode>().map_err(|_| {
-                    std::io::Error::new(io::ErrorKind::Other, "could not parse status parameter")
-                })?)
+                Some(
+                    status
+                        .parse::<StatusCode>()
+                        .map_err(|_| std::io::Error::other("could not parse status parameter"))?,
+                )
             } else {
                 None
             };
@@ -801,7 +803,7 @@ where
                     this.read_buf.extend_from_slice(message.as_payload());
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)));
+                    return Poll::Ready(Err(std::io::Error::other(e)));
                 }
                 Poll::Ready(None) => {
                     return Poll::Ready(Err(std::io::Error::new(
@@ -836,11 +838,9 @@ where
                 .start_send_unpin(tokio_websockets::Message::binary(data))
             {
                 Ok(()) => Poll::Ready(Ok(buf.len())),
-                Err(e) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+                Err(e) => Poll::Ready(Err(std::io::Error::other(e))),
             },
-            Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -849,14 +849,14 @@ where
         self.project()
             .inner
             .poll_flush_unpin(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.project()
             .inner
             .poll_close_unpin(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -920,6 +920,22 @@ mod read_op {
             result,
             Some(ServerOp::Info(Box::new(ServerInfo {
                 version: "1.0.0".into(),
+                ..Default::default()
+            })))
+        );
+
+        server
+            .write_all(b"INFO { \"version\": \"1.0.0\", \"cluster\": \"test-cluster\" }\r\n")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+
+        let result = connection.read_op().await.unwrap();
+        assert_eq!(
+            result,
+            Some(ServerOp::Info(Box::new(ServerInfo {
+                version: "1.0.0".into(),
+                cluster: Some("test-cluster".into()),
                 ..Default::default()
             })))
         );

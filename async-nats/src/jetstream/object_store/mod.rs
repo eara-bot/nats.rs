@@ -22,11 +22,11 @@ use crate::{HeaderMap, HeaderValue};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::engine::Engine;
 use bytes::BytesMut;
-use futures::future::BoxFuture;
+use futures_util::future::BoxFuture;
 use once_cell::sync::Lazy;
 use tokio::io::AsyncReadExt;
 
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
@@ -129,6 +129,9 @@ impl ObjectStore {
     {
         Box::pin(async move {
             let object_info = self.info(object_name).await?;
+            if object_info.deleted {
+                return Err(GetError::new(GetErrorKind::NotFound));
+            }
             if let Some(ref options) = object_info.options {
                 if let Some(link) = options.link.as_ref() {
                     if let Some(link_name) = link.name.as_ref() {
@@ -184,7 +187,7 @@ impl ObjectStore {
         let data = serde_json::to_vec(&object_info).map_err(|err| {
             DeleteError::with_source(
                 DeleteErrorKind::Other,
-                format!("failed deserializing object info: {}", err),
+                format!("failed deserializing object info: {err}"),
             )
         })?;
 
@@ -194,7 +197,7 @@ impl ObjectStore {
             HeaderValue::from_str(ROLLUP_SUBJECT).map_err(|err| {
                 DeleteError::with_source(
                     DeleteErrorKind::Other,
-                    format!("failed parsing header: {}", err),
+                    format!("failed parsing header: {err}"),
                 )
             })?,
         );
@@ -254,7 +257,7 @@ impl ObjectStore {
             serde_json::from_slice::<ObjectInfo>(&message.payload).map_err(|err| {
                 InfoError::with_source(
                     InfoErrorKind::Other,
-                    format!("failed to decode info payload: {}", err),
+                    format!("failed to decode info payload: {err}"),
                 )
             })?;
 
@@ -324,14 +327,14 @@ impl ObjectStore {
                 .map_err(|err| {
                     PutError::with_source(
                         PutErrorKind::PublishChunks,
-                        format!("failed chunk publish: {}", err),
+                        format!("failed chunk publish: {err}"),
                     )
                 })?
                 .await
                 .map_err(|err| {
                     PutError::with_source(
                         PutErrorKind::PublishChunks,
-                        format!("failed getting chunk ack: {}", err),
+                        format!("failed getting chunk ack: {err}"),
                     )
                 })?;
         }
@@ -365,16 +368,13 @@ impl ObjectStore {
         headers.insert(
             NATS_ROLLUP,
             ROLLUP_SUBJECT.parse::<HeaderValue>().map_err(|err| {
-                PutError::with_source(
-                    PutErrorKind::Other,
-                    format!("failed parsing header: {}", err),
-                )
+                PutError::with_source(PutErrorKind::Other, format!("failed parsing header: {err}"))
             })?,
         );
         let data = serde_json::to_vec(&object_info).map_err(|err| {
             PutError::with_source(
                 PutErrorKind::Other,
-                format!("failed serializing object info: {}", err),
+                format!("failed serializing object info: {err}"),
             )
         })?;
 
@@ -386,14 +386,14 @@ impl ObjectStore {
             .map_err(|err| {
                 PutError::with_source(
                     PutErrorKind::PublishMetadata,
-                    format!("failed publishing metadata: {}", err),
+                    format!("failed publishing metadata: {err}"),
                 )
             })?
             .await
             .map_err(|err| {
                 PutError::with_source(
                     PutErrorKind::PublishMetadata,
-                    format!("failed ack from metadata publish: {}", err),
+                    format!("failed ack from metadata publish: {err}"),
                 )
             })?;
 
@@ -418,7 +418,7 @@ impl ObjectStore {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -468,7 +468,7 @@ impl ObjectStore {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -506,7 +506,7 @@ impl ObjectStore {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -618,14 +618,14 @@ impl ObjectStore {
             ROLLUP_SUBJECT.parse::<HeaderValue>().map_err(|err| {
                 UpdateMetadataError::with_source(
                     UpdateMetadataErrorKind::Other,
-                    format!("failed parsing header: {}", err),
+                    format!("failed parsing header: {err}"),
                 )
             })?,
         );
         let data = serde_json::to_vec(&info).map_err(|err| {
             UpdateMetadataError::with_source(
                 UpdateMetadataErrorKind::Other,
-                format!("failed serializing object info: {}", err),
+                format!("failed serializing object info: {err}"),
             )
         })?;
 
@@ -637,14 +637,14 @@ impl ObjectStore {
             .map_err(|err| {
                 UpdateMetadataError::with_source(
                     UpdateMetadataErrorKind::PublishMetadata,
-                    format!("failed publishing metadata: {}", err),
+                    format!("failed publishing metadata: {err}"),
                 )
             })?
             .await
             .map_err(|err| {
                 UpdateMetadataError::with_source(
                     UpdateMetadataErrorKind::PublishMetadata,
-                    format!("failed ack from metadata publish: {}", err),
+                    format!("failed ack from metadata publish: {err}"),
                 )
             })?;
 
@@ -807,14 +807,14 @@ async fn publish_meta(store: &ObjectStore, info: &ObjectInfo) -> Result<(), Publ
         ROLLUP_SUBJECT.parse::<HeaderValue>().map_err(|err| {
             PublishMetadataError::with_source(
                 PublishMetadataErrorKind::Other,
-                format!("failed parsing header: {}", err),
+                format!("failed parsing header: {err}"),
             )
         })?,
     );
     let data = serde_json::to_vec(&info).map_err(|err| {
         PublishMetadataError::with_source(
             PublishMetadataErrorKind::Other,
-            format!("failed serializing object info: {}", err),
+            format!("failed serializing object info: {err}"),
         )
     })?;
 
@@ -826,14 +826,14 @@ async fn publish_meta(store: &ObjectStore, info: &ObjectInfo) -> Result<(), Publ
         .map_err(|err| {
             PublishMetadataError::with_source(
                 PublishMetadataErrorKind::PublishMetadata,
-                format!("failed publishing metadata: {}", err),
+                format!("failed publishing metadata: {err}"),
             )
         })?
         .await
         .map_err(|err| {
             PublishMetadataError::with_source(
                 PublishMetadataErrorKind::PublishMetadata,
-                format!("failed ack from metadata publish: {}", err),
+                format!("failed ack from metadata publish: {err}"),
             )
         })?;
     Ok(())
@@ -857,7 +857,7 @@ impl Stream for Watch {
                         .map_err(|err| {
                             WatcherError::with_source(
                                 WatcherErrorKind::Other,
-                                format!("failed to deserialize object info: {}", err),
+                                format!("failed to deserialize object info: {err}"),
                             )
                         })
                         .map_or_else(|err| Some(Err(err)), |result| Some(Ok(result))),
@@ -905,7 +905,7 @@ impl Stream for List {
                                 .map_err(|err| {
                                     ListerError::with_source(
                                         ListerErrorKind::Other,
-                                        format!("failed deserializing object info: {}", err),
+                                        format!("failed deserializing object info: {err}"),
                                     )
                                 })?;
                             if response.deleted {
@@ -934,13 +934,24 @@ pub struct Object {
     stream: crate::jetstream::stream::Stream,
 }
 
+impl std::fmt::Debug for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Object")
+            .field("info", &self.info)
+            .field("remaining_bytes", &self.remaining_bytes)
+            .field("has_pending_messages", &self.has_pending_messages)
+            .finish()
+    }
+}
+
 impl Object {
     pub(crate) fn new(info: ObjectInfo, stream: stream::Stream) -> Self {
+        let has_pending_messages = info.chunks > 0;
         Object {
             subscription: None,
             info,
             remaining_bytes: VecDeque::new(),
-            has_pending_messages: true,
+            has_pending_messages,
             digest: Some(Sha256::new()),
             subscription_future: None,
             stream,
@@ -979,7 +990,7 @@ impl tokio::io::AsyncRead for Object {
                             stream
                                 .create_consumer(OrderedConfig {
                                     deliver_subject: stream.context.client.new_inbox(),
-                                    filter_subject: format!("$O.{}.C.{}", bucket, nuid),
+                                    filter_subject: format!("$O.{bucket}.C.{nuid}"),
                                     ..Default::default()
                                 })
                                 .await
@@ -1001,10 +1012,9 @@ impl tokio::io::AsyncRead for Object {
                     Poll::Ready(message) => match message {
                         Some(message) => {
                             let message = message.map_err(|err| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("error from JetStream subscription: {err}"),
-                                )
+                                std::io::Error::other(format!(
+                                    "error from JetStream subscription: {err}"
+                                ))
                             })?;
                             let len = cmp::min(buf.remaining(), message.payload.len());
                             buf.put_slice(&message.payload[..len]);
@@ -1014,10 +1024,9 @@ impl tokio::io::AsyncRead for Object {
                             self.remaining_bytes.extend(&message.payload[len..]);
 
                             let info = message.info().map_err(|err| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("error from JetStream subscription: {err}"),
-                                )
+                                std::io::Error::other(format!(
+                                    "error from JetStream subscription: {err}"
+                                ))
                             })?;
                             if info.pending == 0 {
                                 let digest = self.digest.take().map(Sha256::finish);
@@ -1048,8 +1057,7 @@ impl tokio::io::AsyncRead for Object {
                             }
                             Poll::Ready(Ok(()))
                         }
-                        None => Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        None => Poll::Ready(Err(std::io::Error::other(
                             "subscription ended before reading whole object",
                         ))),
                     },

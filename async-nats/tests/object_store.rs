@@ -22,7 +22,7 @@ mod object_store {
         HeaderMap,
     };
     use base64::Engine;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use rand::RngCore;
     use tokio::io::AsyncReadExt;
 
@@ -137,7 +137,7 @@ mod object_store {
         let jetstream = async_nats::jetstream::new(client.clone());
 
         let bucket_name = "bucket";
-        let stream_name = format!("OBJ_{}", bucket_name);
+        let stream_name = format!("OBJ_{bucket_name}");
 
         let bucket = jetstream
             .create_object_store(async_nats::jetstream::object_store::Config {
@@ -347,6 +347,12 @@ mod object_store {
         let info = bucket.info("FOO").await.unwrap();
         assert!(info.deleted);
         assert!(info.size == 0);
+
+        let result = bucket.get("FOO").await.unwrap_err();
+        assert_eq!(
+            result.kind(),
+            async_nats::jetstream::object_store::GetErrorKind::NotFound
+        );
     }
 
     #[tokio::test]
@@ -683,5 +689,28 @@ mod object_store {
                 .as_str(),
             "another"
         );
+    }
+
+    #[tokio::test]
+    async fn get_empty_object() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let jetstream = async_nats::jetstream::new(client);
+
+        let bucket = jetstream
+            .create_object_store(async_nats::jetstream::object_store::Config {
+                bucket: "bucket".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        bucket.put("FOO", &mut Vec::new().as_slice()).await.unwrap();
+
+        let mut object = bucket.get("FOO").await.unwrap();
+        let mut buffer = Vec::new();
+        let result = object.read(&mut buffer).await.unwrap();
+        assert_eq!(result, 0);
     }
 }

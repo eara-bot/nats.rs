@@ -28,8 +28,8 @@
 //! ```no_run
 //! # #[tokio::main]
 //! # async fn mains() -> Result<(), async_nats::Error> {
-//! use futures::StreamExt;
-//! use futures::TryStreamExt;
+//! use futures_util::StreamExt;
+//! use futures_util::TryStreamExt;
 //!
 //! // Connect to NATS server
 //! let client = async_nats::connect("localhost:4222").await?;
@@ -78,8 +78,8 @@
 //! ```no_run
 //! # #[tokio::main]
 //! # async fn mains() -> Result<(), async_nats::Error> {
-//! use futures::StreamExt;
-//! use futures::TryStreamExt;
+//! use futures_util::StreamExt;
+//! use futures_util::TryStreamExt;
 //!
 //! // Connect to NATS server
 //! let client = async_nats::connect("localhost:4222").await?;
@@ -136,7 +136,7 @@ pub mod publish;
 pub mod response;
 pub mod stream;
 
-pub use context::Context;
+pub use context::{Context, ContextBuilder};
 pub use errors::Error;
 pub use errors::ErrorCode;
 pub use message::{AckKind, Message};

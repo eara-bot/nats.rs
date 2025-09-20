@@ -18,7 +18,7 @@ use std::{
     time::Instant,
 };
 
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use tracing::{debug, trace};
 
@@ -103,7 +103,7 @@ impl Endpoint {
         self.requests
             .unsubscribe()
             .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "failed to unsubscribe"))
+            .map_err(|_| std::io::Error::other("failed to unsubscribe"))
     }
 }
 

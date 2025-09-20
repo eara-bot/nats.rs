@@ -23,19 +23,22 @@ use crate::{
     header, is_valid_subject, Client, Command, HeaderMap, HeaderValue, Message, StatusCode,
 };
 use bytes::Bytes;
-use futures::future::BoxFuture;
-use futures::{Future, StreamExt, TryFutureExt};
+use futures_util::future::BoxFuture;
+use futures_util::{Future, StreamExt, TryFutureExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{self, json};
 use std::borrow::Borrow;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::IntoFuture;
 use std::pin::Pin;
 use std::str::from_utf8;
+use std::sync::Arc;
 use std::task::Poll;
-use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, TryAcquireError};
+use tokio::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
 use super::consumer::{self, Consumer, FromConsumer, IntoConsumerConfig};
@@ -56,35 +59,272 @@ pub struct Context {
     pub(crate) client: Client,
     pub(crate) prefix: String,
     pub(crate) timeout: Duration,
+    pub(crate) max_ack_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) acker_task: Arc<tokio::task::JoinHandle<()>>,
+    pub(crate) ack_sender:
+        tokio::sync::mpsc::Sender<(oneshot::Receiver<Message>, OwnedSemaphorePermit)>,
+    pub(crate) backpressure_on_inflight: bool,
+    pub(crate) semaphore_capacity: usize,
+}
+
+fn spawn_acker(
+    rx: ReceiverStream<(oneshot::Receiver<Message>, OwnedSemaphorePermit)>,
+    ack_timeout: Duration,
+    concurrency: Option<usize>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        rx.for_each_concurrent(concurrency, |(subscription, permit)| async move {
+            tokio::time::timeout(ack_timeout, subscription).await.ok();
+            drop(permit);
+        })
+        .await;
+    })
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        self.acker_task.abort();
+    }
+}
+
+use std::marker::PhantomData;
+
+#[derive(Debug, Default)]
+pub struct Yes;
+#[derive(Debug, Default)]
+pub struct No;
+
+pub trait ToAssign: Debug {}
+
+impl ToAssign for Yes {}
+impl ToAssign for No {}
+
+/// A builder for [Context]. Beyond what can be set by standard constructor, it allows tweaking
+/// pending publish ack backpressure settings.
+/// # Examples
+/// ```no_run
+/// # use async_nats::jetstream::context::ContextBuilder;
+/// # use async_nats::Client;
+/// # use std::time::Duration;
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), async_nats::Error> {
+/// let client = async_nats::connect("demo.nats.io").await?;
+/// let context = ContextBuilder::new()
+///     .timeout(Duration::from_secs(5))
+///     .api_prefix("MY.JS.API")
+///     .max_ack_inflight(1000)
+///     .build(client);
+/// # Ok(())
+/// # }
+/// ```
+pub struct ContextBuilder<PREFIX: ToAssign> {
+    prefix: String,
+    timeout: Duration,
+    semaphore_capacity: usize,
+    ack_timeout: Duration,
+    backpressure_on_inflight: bool,
+    concurrency_limit: Option<usize>,
+    _phantom: PhantomData<PREFIX>,
+}
+
+impl Default for ContextBuilder<Yes> {
+    fn default() -> Self {
+        ContextBuilder {
+            prefix: "$JS.API".to_string(),
+            timeout: Duration::from_secs(5),
+            semaphore_capacity: 5_000,
+            ack_timeout: Duration::from_secs(30),
+            backpressure_on_inflight: true,
+            concurrency_limit: None,
+            _phantom: PhantomData {},
+        }
+    }
+}
+
+impl ContextBuilder<Yes> {
+    /// Create a new [ContextBuilder] with default settings.
+    pub fn new() -> ContextBuilder<Yes> {
+        ContextBuilder::default()
+    }
+}
+
+impl ContextBuilder<Yes> {
+    /// Set the prefix for the JetStream API.
+    pub fn api_prefix<T: Into<String>>(self, prefix: T) -> ContextBuilder<No> {
+        ContextBuilder {
+            prefix: prefix.into(),
+            timeout: self.timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the domain for the JetStream API. Domain is the middle part of standard API prefix:
+    /// $JS.{domain}.API.
+    pub fn domain<T: Into<String>>(self, domain: T) -> ContextBuilder<No> {
+        ContextBuilder {
+            prefix: format!("$JS.{}.API", domain.into()),
+            timeout: self.timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<PREFIX> ContextBuilder<PREFIX>
+where
+    PREFIX: ToAssign,
+{
+    /// Set the timeout for all JetStream API requests.
+    pub fn timeout(self, timeout: Duration) -> ContextBuilder<Yes>
+    where
+        Yes: ToAssign,
+    {
+        ContextBuilder {
+            prefix: self.prefix,
+            timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the maximum time client waits for acks from the server when default backpressure is
+    /// used.
+    pub fn ack_timeout(self, ack_timeout: Duration) -> ContextBuilder<Yes>
+    where
+        Yes: ToAssign,
+    {
+        ContextBuilder {
+            prefix: self.prefix,
+            timeout: self.timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the maximum number of pending acks that can be in flight at any given time.
+    /// If limit is reached, `publish` throws an error by default, or waits if backpressure is enabled.
+    pub fn max_ack_inflight(self, capacity: usize) -> ContextBuilder<Yes>
+    where
+        Yes: ToAssign,
+    {
+        ContextBuilder {
+            prefix: self.prefix,
+            timeout: self.timeout,
+            semaphore_capacity: capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Enable or disable backpressure when max inflight acks is reached.
+    /// When enabled, publish will wait for permits to become available instead of returning an
+    /// error.
+    /// Default is false (errors on max inflight).
+    pub fn backpressure_on_inflight(self, enabled: bool) -> ContextBuilder<Yes>
+    where
+        Yes: ToAssign,
+    {
+        ContextBuilder {
+            prefix: self.prefix,
+            timeout: self.timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: enabled,
+            concurrency_limit: self.concurrency_limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the concurrency limit for the ack handler task. This might be useful
+    /// in scenarios where Tokio runtime is under heavy load.
+    pub fn concurrency_limit(self, limit: Option<usize>) -> ContextBuilder<Yes>
+    where
+        Yes: ToAssign,
+    {
+        ContextBuilder {
+            prefix: self.prefix,
+            timeout: self.timeout,
+            semaphore_capacity: self.semaphore_capacity,
+            ack_timeout: self.ack_timeout,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            concurrency_limit: limit,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Build the [Context] with the given settings.
+    pub fn build(self, client: Client) -> Context {
+        let acker_channel_capacity = self.semaphore_capacity;
+        let (tx, rx) = tokio::sync::mpsc::channel::<(
+            oneshot::Receiver<Message>,
+            OwnedSemaphorePermit,
+        )>(acker_channel_capacity);
+        let stream = ReceiverStream::new(rx);
+        let acker_task = Arc::new(spawn_acker(
+            stream,
+            self.ack_timeout,
+            self.concurrency_limit,
+        ));
+        Context {
+            client,
+            prefix: self.prefix,
+            timeout: self.timeout,
+            max_ack_semaphore: Arc::new(tokio::sync::Semaphore::new(self.semaphore_capacity)),
+            acker_task,
+            ack_sender: tx,
+            backpressure_on_inflight: self.backpressure_on_inflight,
+            semaphore_capacity: self.semaphore_capacity,
+        }
+    }
 }
 
 impl Context {
     pub(crate) fn new(client: Client) -> Context {
-        Context {
-            client,
-            prefix: "$JS.API".to_string(),
-            timeout: Duration::from_secs(5),
-        }
+        ContextBuilder::default().build(client)
     }
 
+    /// Sets the timeout for all JetStream API requests.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout
     }
 
-    pub(crate) fn with_prefix<T: ToString>(client: Client, prefix: T) -> Context {
-        Context {
-            client,
-            prefix: prefix.to_string(),
-            timeout: Duration::from_secs(5),
-        }
+    /// Waits until all pending `acks` are received from the server.
+    /// Be aware that this is probably not the way you want to await `acks`,
+    /// as it will wait for every `ack` that is pending, including those that might
+    /// be published after you call this method.
+    /// Useful in testing, or maybe batching.
+    pub async fn wait_for_acks(&self) {
+        self.max_ack_semaphore
+            .acquire_many(self.semaphore_capacity as u32)
+            .await
+            .ok();
     }
 
+    /// Create a new [Context] with given API prefix.
+    pub(crate) fn with_prefix<T: ToString>(client: Client, prefix: T) -> Context {
+        ContextBuilder::new()
+            .api_prefix(prefix.to_string())
+            .build(client)
+    }
+
+    /// Create a new [Context] with given domain.
     pub(crate) fn with_domain<T: AsRef<str>>(client: Client, domain: T) -> Context {
-        Context {
-            client,
-            prefix: format!("$JS.{}.API", domain.as_ref()),
-            timeout: Duration::from_secs(5),
-        }
+        ContextBuilder::new().domain(domain.as_ref()).build(client)
     }
 
     /// Publishes [jetstream::Message][super::message::Message] to the [Stream] without waiting for
@@ -194,6 +434,25 @@ impl Context {
         subject: S,
         publish: Publish,
     ) -> Result<PublishAckFuture, PublishError> {
+        let permit = if self.backpressure_on_inflight {
+            // When backpressure is enabled, wait for a permit to become available
+            self.max_ack_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|err| PublishError::with_source(PublishErrorKind::Other, err))?
+        } else {
+            // When backpressure is disabled, error immediately if no permits available
+            self.max_ack_semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|err| match err {
+                    TryAcquireError::NoPermits => {
+                        PublishError::new(PublishErrorKind::MaxAckPending)
+                    }
+                    _ => PublishError::with_source(PublishErrorKind::Other, err),
+                })?
+        };
         let subject = subject.to_subject();
         let (sender, receiver) = oneshot::channel();
 
@@ -217,7 +476,9 @@ impl Context {
 
         Ok(PublishAckFuture {
             timeout: self.timeout,
-            subscription: receiver,
+            subscription: Some(receiver),
+            permit: Some(permit),
+            tx: self.ack_sender.clone(),
         })
     }
 
@@ -591,7 +852,7 @@ impl Context {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::TryStreamExt;
+    /// use futures_util::TryStreamExt;
     /// let client = async_nats::connect("demo.nats.io:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     /// let stream_name = jetstream.stream_by_subject("foo.>");
@@ -637,7 +898,7 @@ impl Context {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::TryStreamExt;
+    /// use futures_util::TryStreamExt;
     /// let client = async_nats::connect("demo.nats.io:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     /// let mut names = jetstream.stream_names();
@@ -665,7 +926,7 @@ impl Context {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::TryStreamExt;
+    /// use futures_util::TryStreamExt;
     /// let client = async_nats::connect("demo.nats.io:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     /// let mut streams = jetstream.streams();
@@ -923,8 +1184,7 @@ impl Context {
     // pub async fn update_key_value<C: Borrow<kv::Config>>(&self, config: C) -> Result<(), crate::Error> {
     //     let config = config.borrow();
     //     if !crate::jetstream::kv::is_valid_bucket_name(&config.bucket) {
-    //         return Err(Box::new(std::io::Error::new(
-    //             ErrorKind::Other,
+    //         return Err(Box::new(std::io::Error::other(
     //             "invalid bucket name",
     //         )));
     //     }
@@ -1372,6 +1632,7 @@ pub enum PublishErrorKind {
     WrongLastSequence,
     TimedOut,
     BrokenPipe,
+    MaxAckPending,
     Other,
 }
 
@@ -1384,6 +1645,7 @@ impl Display for PublishErrorKind {
             Self::BrokenPipe => write!(f, "broken pipe"),
             Self::WrongLastMessageId => write!(f, "wrong last message id"),
             Self::WrongLastSequence => write!(f, "wrong last sequence"),
+            Self::MaxAckPending => write!(f, "max ack pending reached"),
         }
     }
 }
@@ -1393,12 +1655,24 @@ pub type PublishError = Error<PublishErrorKind>;
 #[derive(Debug)]
 pub struct PublishAckFuture {
     timeout: Duration,
-    subscription: oneshot::Receiver<Message>,
+    subscription: Option<oneshot::Receiver<Message>>,
+    permit: Option<OwnedSemaphorePermit>,
+    tx: mpsc::Sender<(oneshot::Receiver<Message>, OwnedSemaphorePermit)>,
+}
+
+impl Drop for PublishAckFuture {
+    fn drop(&mut self) {
+        if let (Some(sub), Some(permit)) = (self.subscription.take(), self.permit.take()) {
+            if let Err(err) = self.tx.try_send((sub, permit)) {
+                tracing::warn!("failed to pass future permit to the acker: {}", err);
+            }
+        }
+    }
 }
 
 impl PublishAckFuture {
-    async fn next_with_timeout(self) -> Result<PublishAck, PublishError> {
-        let next = tokio::time::timeout(self.timeout, self.subscription)
+    async fn next_with_timeout(mut self) -> Result<PublishAck, PublishError> {
+        let next = tokio::time::timeout(self.timeout, self.subscription.take().unwrap())
             .await
             .map_err(|_| PublishError::new(PublishErrorKind::TimedOut))?;
         next.map_or_else(
@@ -1462,7 +1736,7 @@ pub struct StreamNames {
     done: bool,
 }
 
-impl futures::Stream for StreamNames {
+impl futures_util::Stream for StreamNames {
     type Item = Result<String, StreamsError>;
 
     fn poll_next(
@@ -1538,7 +1812,7 @@ pub struct Streams {
     done: bool,
 }
 
-impl futures::Stream for Streams {
+impl futures_util::Stream for Streams {
     type Item = Result<super::stream::Info, StreamsError>;
 
     fn poll_next(
@@ -1735,7 +2009,7 @@ impl Display for ConsumerInfoErrorKind {
             Self::NotFound => write!(f, "consumer not found"),
             Self::StreamNotFound => write!(f, "stream not found"),
             Self::Request => write!(f, "request error"),
-            Self::JetStream(err) => write!(f, "jetstream error: {}", err),
+            Self::JetStream(err) => write!(f, "jetstream error: {err}"),
             Self::TimedOut => write!(f, "timed out"),
             Self::NoResponders => write!(f, "no responders"),
         }
@@ -1791,7 +2065,7 @@ impl Display for CreateStreamErrorKind {
             Self::InvalidStreamName => write!(f, "stream name cannot contain `.`, `_`"),
             Self::DomainAndExternalSet => write!(f, "domain and external are both set"),
             Self::NotFound => write!(f, "stream not found"),
-            Self::JetStream(err) => write!(f, "jetstream error: {}", err),
+            Self::JetStream(err) => write!(f, "jetstream error: {err}"),
             Self::TimedOut => write!(f, "jetstream request timed out"),
             Self::JetStreamUnavailable => write!(f, "jetstream unavailable"),
             Self::ResponseParse => write!(f, "failed to parse server response"),
@@ -1841,7 +2115,7 @@ impl Display for GetStreamErrorKind {
             Self::EmptyName => write!(f, "empty name cannot be empty"),
             Self::Request => write!(f, "request error"),
             Self::InvalidStreamName => write!(f, "invalid stream name"),
-            Self::JetStream(err) => write!(f, "jetstream error: {}", err),
+            Self::JetStream(err) => write!(f, "jetstream error: {err}"),
         }
     }
 }
@@ -1860,7 +2134,7 @@ impl Display for GetStreamByNameErrorKind {
             Self::Request => write!(f, "request error"),
             Self::NotFound => write!(f, "stream not found"),
             Self::InvalidSubject => write!(f, "invalid subject"),
-            Self::JetStream(err) => write!(f, "jetstream error: {}", err),
+            Self::JetStream(err) => write!(f, "jetstream error: {err}"),
         }
     }
 }
@@ -1981,7 +2255,7 @@ impl Display for AccountErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TimedOut => write!(f, "timed out"),
-            Self::JetStream(err) => write!(f, "JetStream error: {}", err),
+            Self::JetStream(err) => write!(f, "JetStream error: {err}"),
             Self::Other => write!(f, "error"),
             Self::JetStreamUnavailable => write!(f, "JetStream unavailable"),
         }

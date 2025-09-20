@@ -16,8 +16,8 @@ use super::context::Context;
 use crate::{error, header, Error};
 use crate::{subject::Subject, HeaderMap};
 use bytes::Bytes;
-use futures::future::TryFutureExt;
-use futures::StreamExt;
+use futures_util::future::TryFutureExt;
+use futures_util::StreamExt;
 use std::fmt::Display;
 use std::{mem, time::Duration};
 use time::format_description::well_known::Rfc3339;
@@ -56,7 +56,7 @@ impl TryFrom<crate::Message> for StreamMessage {
                 seq.as_str().parse().map_err(|err| {
                     StreamMessageError::with_source(
                         StreamMessageErrorKind::ParseError,
-                        format!("could not parse sequence header: {}", err),
+                        format!("could not parse sequence header: {err}"),
                     )
                 })
             })?;
@@ -70,7 +70,7 @@ impl TryFrom<crate::Message> for StreamMessage {
                 OffsetDateTime::parse(time.as_str(), &Rfc3339).map_err(|err| {
                     StreamMessageError::with_source(
                         StreamMessageErrorKind::ParseError,
-                        format!("could not parse timestamp header: {}", err),
+                        format!("could not parse timestamp header: {err}"),
                     )
                 })
             })?;
@@ -150,7 +150,7 @@ impl Message {
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// use async_nats::jetstream::consumer::PullConsumer;
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -176,8 +176,7 @@ impl Message {
                 .map_err(Error::from)
                 .await
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }
@@ -192,7 +191,7 @@ impl Message {
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// use async_nats::jetstream::consumer::PullConsumer;
     /// use async_nats::jetstream::AckKind;
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -218,8 +217,7 @@ impl Message {
                 .map_err(Error::from)
                 .await
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }
@@ -237,7 +235,7 @@ impl Message {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -272,14 +270,10 @@ impl Message {
                     )
                 })? {
                 Some(_) => Ok(()),
-                None => Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "subscription dropped",
-                ))),
+                None => Err(Box::new(std::io::Error::other("subscription dropped"))),
             }
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }
@@ -297,8 +291,7 @@ impl Message {
         })?;
 
         if !reply.starts_with(PREFIX) {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(Box::new(std::io::Error::other(
                 "did not found proper prefix",
             )));
         }
@@ -340,10 +333,7 @@ impl Message {
                     }
                     next
                 } else {
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "too few tokens",
-                    )));
+                    return Err(Box::new(std::io::Error::other("too few tokens")));
                 }
             };
         }
@@ -402,10 +392,7 @@ impl Message {
                 token: None,
             })
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "bad token number",
-            )))
+            Err(Box::new(std::io::Error::other("bad token number")))
         }
     }
 }
@@ -435,7 +422,7 @@ impl Acker {
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// use async_nats::jetstream::consumer::PullConsumer;
     /// use async_nats::jetstream::Message;
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -466,8 +453,7 @@ impl Acker {
                 .map_err(Error::from)
                 .await
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }
@@ -483,7 +469,7 @@ impl Acker {
     /// use async_nats::jetstream::consumer::PullConsumer;
     /// use async_nats::jetstream::AckKind;
     /// use async_nats::jetstream::Message;
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -514,8 +500,7 @@ impl Acker {
                 .map_err(Error::from)
                 .await
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }
@@ -534,7 +519,7 @@ impl Acker {
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// use async_nats::jetstream::Message;
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("localhost:4222").await?;
     /// let jetstream = async_nats::jetstream::new(client);
     ///
@@ -574,14 +559,10 @@ impl Acker {
                     )
                 })? {
                 Some(_) => Ok(()),
-                None => Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "subscription dropped",
-                ))),
+                None => Err(Box::new(std::io::Error::other("subscription dropped"))),
             }
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Box::new(std::io::Error::other(
                 "No reply subject, not a JetStream message",
             )))
         }

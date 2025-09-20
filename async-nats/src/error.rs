@@ -27,11 +27,11 @@ impl<Kind> Error<Kind>
 where
     Kind: Clone + Debug + Display + PartialEq,
 {
-    pub(crate) fn new(kind: Kind) -> Self {
+    pub fn new(kind: Kind) -> Self {
         Self { kind, source: None }
     }
 
-    pub(crate) fn with_source<S>(kind: Kind, source: S) -> Self
+    pub fn with_source<S>(kind: Kind, source: S) -> Self
     where
         S: Into<crate::Error>,
     {
@@ -115,7 +115,7 @@ mod test {
 
     #[test]
     fn with_source() {
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "foo");
+        let source = std::io::Error::other("foo");
         let error = FooError::with_source(FooErrorKind::Bar, source);
         assert_eq!(error.kind, FooErrorKind::Bar);
         assert_eq!(error.source.unwrap().to_string(), "foo");
@@ -133,7 +133,7 @@ mod test {
     #[test]
     fn display_without_source() {
         let error: FooError = FooErrorKind::Bar.into();
-        assert_eq!(format!("{}", error), "bar error");
+        assert_eq!(format!("{error}"), "bar error");
     }
 
     #[test]

@@ -13,6 +13,7 @@
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use std::future::Future;
 
 use crate::connection::State;
 use crate::subject::ToSubject;
@@ -21,8 +22,8 @@ use crate::{PublishMessage, ServerInfo};
 use super::{header::HeaderMap, status::StatusCode, Command, Message, Subscriber};
 use crate::error::Error;
 use bytes::Bytes;
-use futures::future::TryFutureExt;
-use futures::{Sink, SinkExt as _, StreamExt};
+use futures_util::future::TryFutureExt;
+use futures_util::{Sink, SinkExt as _, StreamExt};
 use once_cell::sync::Lazy;
 use portable_atomic::AtomicU64;
 use regex::Regex;
@@ -57,6 +58,7 @@ impl From<tokio_util::sync::PollSendError<Command>> for PublishError {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PublishErrorKind {
     MaxPayloadExceeded,
+    BadSubject,
     Send,
 }
 
@@ -65,6 +67,7 @@ impl Display for PublishErrorKind {
         match self {
             PublishErrorKind::MaxPayloadExceeded => write!(f, "max payload size exceeded"),
             PublishErrorKind::Send => write!(f, "failed to send message"),
+            PublishErrorKind::BadSubject => write!(f, "bad subject"),
         }
     }
 }
@@ -84,6 +87,77 @@ pub struct Client {
     request_timeout: Option<Duration>,
     max_payload: Arc<AtomicUsize>,
     connection_stats: Arc<Statistics>,
+}
+
+pub mod traits {
+    use std::{future::Future, time::Duration};
+
+    use bytes::Bytes;
+
+    use crate::{subject::ToSubject, Message};
+
+    use super::{PublishError, Request, RequestError, SubscribeError};
+
+    pub trait Publisher {
+        fn publish_with_reply<S: ToSubject, R: ToSubject>(
+            &self,
+            subject: S,
+            reply: R,
+            payload: Bytes,
+        ) -> impl Future<Output = Result<(), PublishError>>;
+    }
+    pub trait Subscriber {
+        fn subscribe<S: ToSubject>(
+            &self,
+            subject: S,
+        ) -> impl Future<Output = Result<crate::Subscriber, SubscribeError>>;
+    }
+    pub trait Requester {
+        fn send_request<S: ToSubject>(
+            &self,
+            subject: S,
+            request: Request,
+        ) -> impl Future<Output = Result<Message, RequestError>>;
+    }
+    pub trait TimeoutProvider {
+        fn timeout(&self) -> Option<Duration>;
+    }
+}
+
+impl traits::Requester for Client {
+    fn send_request<S: ToSubject>(
+        &self,
+        subject: S,
+        request: Request,
+    ) -> impl Future<Output = Result<Message, RequestError>> {
+        self.send_request(subject, request)
+    }
+}
+
+impl traits::TimeoutProvider for Client {
+    fn timeout(&self) -> Option<Duration> {
+        self.timeout()
+    }
+}
+
+impl traits::Publisher for Client {
+    fn publish_with_reply<S: ToSubject, R: ToSubject>(
+        &self,
+        subject: S,
+        reply: R,
+        payload: Bytes,
+    ) -> impl Future<Output = Result<(), PublishError>> {
+        self.publish_with_reply(subject, reply, payload)
+    }
+}
+
+impl traits::Subscriber for Client {
+    fn subscribe<S: ToSubject>(
+        &self,
+        subject: S,
+    ) -> impl Future<Output = Result<Subscriber, SubscribeError>> {
+        self.subscribe(subject)
+    }
 }
 
 impl Sink<PublishMessage> for Client {
@@ -238,8 +312,8 @@ impl Client {
                 PublishErrorKind::MaxPayloadExceeded,
                 format!(
                     "Payload size limit of {} exceeded by message size of {}",
+                    max_payload,
                     payload.len(),
-                    max_payload
                 ),
             ));
         }
@@ -543,7 +617,7 @@ impl Client {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let mut subscription = client.subscribe("events.>").await?;
     /// while let Some(message) = subscription.next().await {
@@ -576,7 +650,7 @@ impl Client {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let mut subscription = client.queue_subscribe("events.>", "queue".into()).await?;
     /// while let Some(message) = subscription.next().await {
@@ -640,7 +714,7 @@ impl Client {
     /// ```no_run
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
-    /// use futures::StreamExt;
+    /// use futures_util::StreamExt;
     /// let client = async_nats::connect("demo.nats.io").await?;
     /// let mut subscription = client.subscribe("events.>").await?;
     ///

@@ -30,6 +30,7 @@ mod jetstream {
     use std::time::Duration;
     use std::time::Instant;
 
+    use async_nats::jetstream::consumer::pull;
     #[cfg(feature = "server_2_11")]
     use async_nats::jetstream::consumer::PriorityPolicy;
     use async_nats::jetstream::context::ConsumerInfoErrorKind;
@@ -55,7 +56,7 @@ mod jetstream {
     };
     use async_nats::jetstream::AckKind;
     use async_nats::{ConnectOptions, StatusCode};
-    use futures::stream::{StreamExt, TryStreamExt};
+    use futures_util::stream::{StreamExt, TryStreamExt};
     use time::OffsetDateTime;
     use tracing::debug;
 
@@ -389,6 +390,13 @@ mod jetstream {
         let cluster = consumer.cached_info().cluster.as_ref().unwrap();
 
         assert_eq!(cluster.replicas.len(), 2);
+        assert!(cluster.leader.is_some());
+        #[cfg(feature = "server_2_12")]
+        {
+            assert!(cluster.leader_since.is_some());
+            assert!(cluster.traffic_account.is_some());
+            assert!(cluster.system_account);
+        }
 
         context.delete_stream("events2").await.unwrap();
     }
@@ -588,6 +596,17 @@ mod jetstream {
 
         let raw_message = stream.get_raw_message(publish_ack.sequence).await.unwrap();
         assert_eq!(raw_message.sequence, publish_ack.sequence);
+
+        // no headers variant
+        let value = stream
+            .raw_message_builder()
+            .sequence(publish_ack.sequence)
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!value.data.is_empty());
     }
 
     #[tokio::test]
@@ -628,6 +647,17 @@ mod jetstream {
             .unwrap();
 
         assert_eq!(raw_message.sequence, publish_ack.sequence);
+
+        // no headers variant
+        let value = stream
+            .raw_message_builder()
+            .last_by_subject("events")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!value.data.is_empty());
     }
 
     #[tokio::test]
@@ -680,6 +710,17 @@ mod jetstream {
             .direct_get_last_for_subject("wrong")
             .await
             .expect_err("should error");
+
+        // no headers variant
+        let payload = stream
+            .direct_get_builder()
+            .last_by_subject("events")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!payload.data.is_empty());
     }
     #[tokio::test]
     async fn direct_get_next_for_subject() {
@@ -723,13 +764,7 @@ mod jetstream {
             .await
             .unwrap();
 
-        let sequence = message
-            .headers
-            .as_ref()
-            .unwrap()
-            .get(header::NATS_SEQUENCE)
-            .unwrap()
-            .as_str();
+        let sequence = message.headers.get(header::NATS_SEQUENCE).unwrap().as_str();
 
         assert_eq!(sequence.parse::<u64>().unwrap(), publish_ack.sequence);
         assert_eq!(payload, message.payload.as_ref());
@@ -738,6 +773,17 @@ mod jetstream {
             .direct_get_next_for_subject("wrong", None)
             .await
             .expect_err("should error");
+
+        // no headers variant
+        let payload = stream
+            .direct_get_builder()
+            .no_headers()
+            .next_by_subject("events")
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!payload.data.is_empty());
     }
 
     #[tokio::test]
@@ -796,13 +842,7 @@ mod jetstream {
             .await
             .unwrap();
 
-        let sequence = message
-            .headers
-            .as_ref()
-            .unwrap()
-            .get(header::NATS_SEQUENCE)
-            .unwrap()
-            .as_str();
+        let sequence = message.headers.get(header::NATS_SEQUENCE).unwrap().as_str();
 
         assert_eq!(sequence.parse::<u64>().unwrap(), publish_ack.sequence);
         assert_eq!(payload, message.payload.as_ref());
@@ -815,6 +855,18 @@ mod jetstream {
             .direct_get_next_for_subject("entries", Some(1))
             .await
             .expect_err("should error");
+
+        // no headers variant
+        let payload = stream
+            .direct_get_builder()
+            .sequence(3)
+            .next_by_subject("events")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!payload.data.is_empty());
     }
 
     #[tokio::test]
@@ -870,6 +922,17 @@ mod jetstream {
         assert_eq!(payload, message.payload.as_ref());
 
         stream.direct_get(22).await.expect_err("should error");
+
+        // no headers variant
+        let payload = stream
+            .direct_get_builder()
+            .sequence(2)
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!payload.data.is_empty());
     }
 
     #[tokio::test]
@@ -2650,7 +2713,7 @@ mod jetstream {
             });
 
             let response: Response<Info> = js
-                .request(format!("CONSUMER.CREATE.{}", stream), &consumer)
+                .request(format!("CONSUMER.CREATE.{stream}"), &consumer)
                 .await
                 .unwrap();
 
@@ -2658,7 +2721,7 @@ mod jetstream {
                 Response::Ok(info) => {
                     assert_eq!(info.config.sample_frequency, 10);
                 }
-                Response::Err { error } => panic!("expected ok response, got: {:?}", error),
+                Response::Err { error } => panic!("expected ok response, got: {error:?}"),
             }
         }
     }
@@ -3934,6 +3997,53 @@ mod jetstream {
             .unwrap();
         assert_eq!(message.sequence, 11);
         assert_eq!(from_utf8(&message.payload).unwrap(), "2");
+
+        // no headers variants
+
+        // by sequence
+        let value = stream
+            .raw_message_builder()
+            .sequence(5)
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+        assert!(!value.data.is_empty());
+        assert_eq!(from_utf8(&value.data).unwrap(), "5");
+
+        // next by subject
+        let value = stream
+            .raw_message_builder()
+            .next_by_subject("events.2")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+        assert!(!value.data.is_empty());
+        assert_eq!(from_utf8(&value.data).unwrap(), "2");
+
+        // last by subject
+        let value = stream
+            .raw_message_builder()
+            .last_by_subject("events.2")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+        assert!(!value.data.is_empty());
+        assert_eq!(from_utf8(&value.data).unwrap(), "2");
+
+        // first by subject starting from sequence
+        let value = stream
+            .raw_message_builder()
+            .sequence(5)
+            .next_by_subject("events.2")
+            .no_headers()
+            .send()
+            .await
+            .unwrap();
+        assert!(!value.data.is_empty());
+        assert_eq!(from_utf8(&value.data).unwrap(), "2");
     }
 
     #[cfg(feature = "server_2_11")]
@@ -3985,6 +4095,8 @@ mod jetstream {
                     no_wait: false,
                     min_pending: Some(10),
                     min_ack_pending: None,
+                    #[cfg(feature = "server_2_12")]
+                    priority: None,
                     group: Some("A".to_string()),
                 },
                 "NOTHING".into(),
@@ -4008,6 +4120,8 @@ mod jetstream {
                     no_wait: false,
                     min_pending: Some(10),
                     min_ack_pending: None,
+                    #[cfg(feature = "server_2_12")]
+                    priority: None,
                     group: Some("A".to_string()),
                 },
                 "NOTHING_ACK".into(),
@@ -4039,6 +4153,8 @@ mod jetstream {
                     no_wait: false,
                     min_pending: Some(10),
                     min_ack_pending: None,
+                    #[cfg(feature = "server_2_12")]
+                    priority: None,
                     group: Some("A".to_string()),
                 },
                 "SOMETHING".into(),
@@ -4060,6 +4176,8 @@ mod jetstream {
                     min_pending: None,
                     min_ack_pending: Some(5),
                     group: Some("A".to_string()),
+                    #[cfg(feature = "server_2_12")]
+                    priority: None,
                 },
                 "SOMETHING_ACK".into(),
             )
@@ -4294,5 +4412,271 @@ mod jetstream {
             consumer.unwrap_err().kind(),
             ConsumerInfoErrorKind::NotFound
         );
+    }
+
+    #[tokio::test]
+    async fn pull_messages_before_first_poll() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let context = async_nats::jetstream::new(client.clone());
+
+        let stream = context
+            .create_stream(async_nats::jetstream::stream::Config {
+                subjects: vec!["test".into()],
+                name: "test".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        for i in 0..50 {
+            context
+                .publish("test", format!("{i}").into())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+        }
+
+        let mut consumer = stream
+            .create_consumer(pull::Config {
+                durable_name: Some("test".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut messages = consumer
+            .stream()
+            .expires(tokio::time::Duration::from_secs(1))
+            .max_messages_per_batch(200)
+            .messages()
+            .await
+            .unwrap();
+
+        // Make sure that no acks are pending, meaning that we didn't send
+        // a pull request before first poll for messages by the user.
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let info = consumer.info().await.unwrap();
+            assert_eq!(info.num_ack_pending, 0);
+        }
+
+        // Now we can start pulling messages.
+        messages.next().await.unwrap().unwrap();
+
+        // After pulling messages, we should have some acks pending.
+        let info = consumer.info().await.unwrap();
+        assert_eq!(info.num_ack_pending, 50);
+    }
+
+    #[tokio::test]
+    async fn mirrors_remove() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+        let context = async_nats::jetstream::new(client);
+
+        context
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: "source".into(),
+                subjects: vec!["test".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        context
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: "mirror".into(),
+                mirror: Some(async_nats::jetstream::stream::Source {
+                    name: "source".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        context
+            .publish("test", "data".into())
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        context.delete_stream("source").await.unwrap();
+
+        let err = context
+            .publish("test", "data".into())
+            .await
+            .unwrap()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.kind(),
+            async_nats::jetstream::context::PublishErrorKind::StreamNotFound
+        );
+
+        context
+            .update_stream(async_nats::jetstream::stream::Config {
+                name: "mirror".into(),
+                subjects: vec!["test".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        context
+            .publish("test", "data".into())
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "server_2_12")]
+    #[tokio::test]
+    async fn prioritized_pull_consumer() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+        let context = async_nats::jetstream::new(client);
+
+        let stream = context
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: "source".into(),
+                subjects: vec!["test".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("consumer".into()),
+                priority_policy: PriorityPolicy::Prioritized,
+                priority_groups: vec!["A".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut high = consumer
+            .stream()
+            .group("A")
+            .max_messages_per_batch(50)
+            .expires(tokio::time::Duration::from_secs(30))
+            .priority(1)
+            .messages()
+            .await
+            .unwrap()
+            .take(10);
+
+        let mut low = consumer
+            .stream()
+            .group("A")
+            .expires(tokio::time::Duration::from_secs(30))
+            .max_messages_per_batch(50)
+            .priority(5)
+            .messages()
+            .await
+            .unwrap()
+            .take(10);
+
+        tokio::time::timeout(Duration::from_millis(100), low.next())
+            .await
+            .unwrap_err();
+
+        tokio::time::timeout(Duration::from_millis(100), high.next())
+            .await
+            .unwrap_err();
+
+        for i in 0..10 {
+            context
+                .publish("test", format!("{i}").into())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_millis(500), low.next())
+            .await
+            .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(1), high.next())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_async_publish_max_ack_pending() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let jetstream = async_nats::jetstream::ContextBuilder::new()
+            .max_ack_inflight(10)
+            .backpressure_on_inflight(false)
+            .build(client);
+
+        jetstream
+            .create_stream(stream::Config {
+                name: "events".to_string(),
+                subjects: vec!["events".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut err_count = 0;
+        for i in 0..50_000 {
+            let ack_future = jetstream.publish("events", format!("{i}").into()).await;
+
+            if let Err(e) = ack_future {
+                if e.kind() != async_nats::jetstream::context::PublishErrorKind::MaxAckPending {
+                    panic!("unexpected publish error: {e}");
+                }
+                err_count += 1;
+            }
+        }
+        assert!(
+            err_count > 0,
+            "should have some errors for too many in-flight ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_publish_backpressure() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let jetstream = async_nats::jetstream::ContextBuilder::new()
+            .max_ack_inflight(10)
+            .backpressure_on_inflight(true)
+            .build(client);
+
+        let stream = jetstream
+            .create_stream(stream::Config {
+                name: "events".to_string(),
+                subjects: vec!["events".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // Do not expect any errors, as backpressure is on.
+        for i in 0..50_000 {
+            jetstream
+                .publish("events", format!("{i}").into())
+                .await
+                .unwrap();
+        }
+        // Make sure all acks are processed.
+        tokio::time::timeout(Duration::from_secs(5), jetstream.wait_for_acks())
+            .await
+            .unwrap();
+        // Check if stream contains all 5000 messages.
+        let info = stream.get_info().await.unwrap();
+        assert_eq!(info.state.messages, 50_000);
     }
 }

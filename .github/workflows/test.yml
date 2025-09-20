@@ -170,7 +170,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v3
       - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@v1
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
           command-arguments: licenses
@@ -187,7 +187,7 @@ jobs:
 
       - name: Install msrv Rust on ubuntu-latest
         id:   install-rust
-        uses: dtolnay/rust-toolchain@1.82.0
+        uses: dtolnay/rust-toolchain@1.85.0
       - name: Cache the build artifacts
         uses: Swatinem/rust-cache@v2
         with:

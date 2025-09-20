@@ -12,14 +12,15 @@
 // limitations under the License.
 
 mod client {
+    use async_nats::client::Request;
     use async_nats::connection::State;
     use async_nats::header::HeaderValue;
     use async_nats::{
-        ConnectErrorKind, ConnectOptions, Event, Request, RequestErrorKind, ServerAddr, Subject,
+        ConnectErrorKind, ConnectOptions, Event, RequestErrorKind, ServerAddr, Subject,
     };
     use bytes::Bytes;
-    use futures::future::join_all;
-    use futures::stream::StreamExt;
+    use futures_util::future::join_all;
+    use futures_util::stream::StreamExt;
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::atomic::Ordering;
@@ -327,7 +328,7 @@ mod client {
         match result {
             Ok(()) => println!("ok"),
             Err(err) => {
-                println!("error: {}", err);
+                println!("error: {err}");
                 println!("source: {:?}", err.source())
             }
         }
@@ -929,7 +930,7 @@ mod client {
         for _ in 0..5 {
             match rx.recv().await.unwrap() {
                 Event::ClientError(async_nats::ClientError::Other(_)) => (),
-                other => panic!("unexpected event: {:?}", other),
+                other => panic!("unexpected event: {other:?}"),
             };
         }
         assert_eq!(
@@ -1063,7 +1064,7 @@ mod client {
         match result {
             Ok(()) => println!("ok"),
             Err(err) => {
-                println!("error: {}", err);
+                println!("error: {err}");
                 println!("source: {:?}", err.source())
             }
         }

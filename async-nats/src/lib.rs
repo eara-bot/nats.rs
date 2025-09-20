@@ -39,7 +39,7 @@
 //!
 //! ```no_run
 //! use bytes::Bytes;
-//! use futures::StreamExt;
+//! use futures_util::StreamExt;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), async_nats::Error> {
@@ -98,7 +98,7 @@
 //!
 //! ```no_run
 //! # use bytes::Bytes;
-//! # use futures::StreamExt;
+//! # use futures_util::StreamExt;
 //! # use std::error::Error;
 //! # use std::time::Instant;
 //! # #[tokio::main]
@@ -196,7 +196,7 @@
 
 use thiserror::Error;
 
-use futures::stream::Stream;
+use futures_util::stream::Stream;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
@@ -324,6 +324,15 @@ pub struct ServerInfo {
     /// Whether server goes into lame duck mode.
     #[serde(default, rename = "ldm")]
     pub lame_duck_mode: bool,
+    /// Name of the cluster if the server is in cluster-mode
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// The configured NATS domain of the server.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Whether the server supports JetStream.
+    #[serde(default)]
+    pub jetstream: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -864,7 +873,7 @@ impl ConnectionHandler {
                     multiplexer
                 } else {
                     let prefix = Subject::from(format!("{}.{}.", prefix, nuid::next()));
-                    let subject = Subject::from(format!("{}*", prefix));
+                    let subject = Subject::from(format!("{prefix}*"));
 
                     self.connection.enqueue_write_op(&ClientOp::Subscribe {
                         sid: MULTIPLEXER_SID,
@@ -1221,7 +1230,7 @@ impl From<io::Error> for ConnectError {
 
 /// Retrieves messages from given `subscription` created by [Client::subscribe].
 ///
-/// Implements [futures::stream::Stream] for ergonomic async message processing.
+/// Implements [futures_util::stream::Stream] for ergonomic async message processing.
 ///
 /// # Examples
 /// ```
@@ -1283,7 +1292,7 @@ impl Subscriber {
     ///
     /// # Examples
     /// ```
-    /// # use futures::StreamExt;
+    /// # use futures_util::StreamExt;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// let client = async_nats::connect("demo.nats.io").await?;
@@ -1318,7 +1327,7 @@ impl Subscriber {
     ///
     /// # Examples
     /// ```no_run
-    /// # use futures::StreamExt;
+    /// # use futures_util::StreamExt;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), async_nats::Error> {
     /// let client = async_nats::connect("demo.nats.io").await?;
@@ -1611,6 +1620,11 @@ impl ServerAddr {
     /// Delegates to [`Url::port_or_known_default`](https://docs.rs/url/latest/url/struct.Url.html#method.port_or_known_default) and defaults to 4222 if none was explicitly specified in creating this `ServerAddr`.
     pub fn port(&self) -> u16 {
         self.0.port_or_known_default().unwrap_or(4222)
+    }
+
+    /// Returns the URL string.
+    pub fn as_url_str(&self) -> &str {
+        self.0.as_str()
     }
 
     /// Returns the optional username in the url.

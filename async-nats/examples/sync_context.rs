@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 
 fn main() -> Result<(), async_nats::Error> {
     // Spawn a new runtime that will run on the current thread.
@@ -36,7 +36,7 @@ fn main() -> Result<(), async_nats::Error> {
 
     // To receive message in a loop, you can use the same pattern as you would in an async context.
     while let Some(message) = rt.block_on(subscription.next()) {
-        println!("Received message {:?}", message);
+        println!("Received message {message:?}");
     }
 
     // You need to drop subscripions in async context, as they do spawn tasks to clean themselves up.
