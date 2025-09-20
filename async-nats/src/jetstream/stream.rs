@@ -2475,15 +2475,20 @@ impl DirectGetBuilder<WithHeaders> {
 impl<T> DirectGetBuilder<T> {
     /// Internal method to send the direct get request and convert to the appropriate type.
     async fn send_internal<R: DirectGetResponse>(&self) -> Result<R, DirectGetError> {
-        let payload = serde_json::to_vec(&self.request).map(Bytes::from)?;
-
-        let request_subject = if let Some(ref subject) = self.request.last_by_subject {
-            format!(
-                "{}.DIRECT.GET.{}.{}",
-                &self.context.prefix, &self.stream_name, subject
+        let (payload, request_subject) = if let Some(ref subject) = self.request.last_by_subject {
+            (
+                Bytes::new(),
+                format!(
+                    "{}.DIRECT.GET.{}.{}",
+                    &self.context.prefix, &self.stream_name, subject
+                ),
             )
         } else {
-            format!("{}.DIRECT.GET.{}", &self.context.prefix, &self.stream_name)
+            let payload = serde_json::to_vec(&self.request).map(Bytes::from)?;
+            (
+                payload,
+                format!("{}.DIRECT.GET.{}", &self.context.prefix, &self.stream_name),
+            )
         };
 
         let response = self
