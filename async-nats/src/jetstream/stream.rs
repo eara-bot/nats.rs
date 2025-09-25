@@ -2511,20 +2511,21 @@ impl DirectGetBuilder<WithHeaders> {
 impl<T> DirectGetBuilder<T> {
     /// Internal method to send the direct get request and convert to the appropriate type.
     async fn send_internal<R: DirectGetResponse>(&self) -> Result<R, DirectGetError> {
-        let (payload, request_subject) = if let Some(ref subject) = self.request.last_by_subject {
-            (
-                Bytes::new(),
-                format!(
-                    "{}.DIRECT.GET.{}.{}",
-                    &self.context.prefix, &self.stream_name, subject
-                ),
+        // When last_by_subject is used, the subject is embedded in the URL and we should send an empty payload
+        // to match the NATS protocol expectation (similar to nats.go implementation)
+        let payload = if self.request.last_by_subject.is_some() {
+            Bytes::new()
+        } else {
+            serde_json::to_vec(&self.request).map(Bytes::from)?
+        };
+
+        let request_subject = if let Some(ref subject) = self.request.last_by_subject {
+            format!(
+                "{}.DIRECT.GET.{}.{}",
+                &self.context.prefix, &self.stream_name, subject
             )
         } else {
-            let payload = serde_json::to_vec(&self.request).map(Bytes::from)?;
-            (
-                payload,
-                format!("{}.DIRECT.GET.{}", &self.context.prefix, &self.stream_name),
-            )
+            format!("{}.DIRECT.GET.{}", &self.context.prefix, &self.stream_name)
         };
 
         let response = self
